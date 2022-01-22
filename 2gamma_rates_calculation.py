@@ -9,10 +9,10 @@ Created on Fri Jan 21 16:26:00 2022
 import os
 import numpy as np 
 import matplotlib.pyplot as plt
-import csv
-import pandas as pd
+#import csv
+#import pandas as pd
 import sys
-import pyne;
+#import pyne;
 import argparse;
 import configparser;
 
@@ -36,6 +36,7 @@ class trap_contents:
                  tspan=0,
                  tspan_corrected=0,
                  beta_population=0,
+                 stacked_population=0
                  ):
         self.filename_out = filename_out
         self.time_in_trap_per_cycle = time_in_trap_per_cycle
@@ -50,22 +51,11 @@ class trap_contents:
         # these aren't inputs, I generate them during simulation
         self.tspan           = tspan
         self.tspan_corrected = tspan_corrected
-        self.beta_population = beta_population # unprocessed
+        self.beta_population = beta_population # processed out of PyNE Material()
+        self.stacked_population = stacked_population
         
         return
     
-    def save_plot(self):
-        print("Saving plot")
-        plt.figure(figsize=(12,9))
-        for key in self.beta_population.keys():
-            plt.plot(self.tspan, self.beta_population[key], label=key)
-        
-        plt.xlabel("time [seconds]")
-        plt.ylabel("population")
-        plt.legend()
-        plt.savefig(self.filename_out, dpi=100)
-        
-        return
     
     def importCBSIM3(self, inputFile):    
         
@@ -154,6 +144,51 @@ class trap_contents:
         self.beta_population = population_array
         return
     
+    def stack_beam(self):
+
+        num_points = self.injection_frequency * self.time_in_trap_per_cycle
+        
+        self.stacked_population = {"Rb98": [[] for i in range(num_points)],
+                                   "Sr98": [[] for i in range(num_points)],
+                                   "Y98": [[] for i in range(num_points)],
+                                   "Zr98": [[] for i in range(num_points)],
+                                   "Nb98": [[] for i in range(num_points)],
+                                   "Mo98": [[] for i in range(num_points)],}
+        
+        for idx, val in enumerate(self.stacked_population):
+            self.stacked_population[val] = add_shifted_array(self.beta_population[val], self.total_injections)
+        
+        print("Stacking beam... %s Hz injection for %s seconds"%(self.injection_frequency, self.total_injections/self.injection_frequency))
+        print("After stacking, total population is %s ions"%sum([self.stacked_population[i][-1] for i in self.stacked_population]))
+        print("Keep in mind that EBIT trap capacity is 1e7 ions.")
+        return 
+    
+
+def save_plot(filename_out, tspan, population_data, title="default title"):
+    print("Saving plot")
+    plt.figure(figsize=(12,9))
+    for key in population_data.keys():
+        plt.plot(tspan, population_data[key], label=key)
+        
+    plt.xlabel("time [seconds]")
+    plt.ylabel("population")
+    plt.title(title)
+    plt.legend()
+    plt.savefig(filename_out, dpi=100)
+    
+    return
+
+def add_shifted_array(array, num_shifts):
+    """ This actually performs the beam stacking"""
+    array0 = array[:]
+    
+    if num_shifts > len(array):
+        sys.exit("can't have more stacks than the total trap time!")
+    
+    for num in range(1, num_shifts):
+        array = array + np.insert(array0, [0]*num,0)[:-num]
+    
+    return array
 
 def probeDecayChain(material, timestamp):
     # How to use this: input a population in the form
@@ -179,7 +214,17 @@ def runSimulation(my_trap_contents):
     # doesnt need inputs, already has self, doesn't need output, already has self
     my_trap_contents.generate_beta_population()
     
-    my_trap_contents.save_plot()
+    my_trap_contents.stack_beam()
+    
+    save_plot(my_trap_contents.filename_out,
+              my_trap_contents.tspan,
+              my_trap_contents.beta_population,
+              title="Single injection population")
+    
+    save_plot(my_trap_contents.filename_out+"_stacked",
+              my_trap_contents.tspan,
+              my_trap_contents.stacked_population,
+              title="Population stacked at %s Hz for %s s duration"%(my_trap_contents.injection_frequency, my_trap_contents.total_injections/my_trap_contents.injection_frequency) )
     
     
     
