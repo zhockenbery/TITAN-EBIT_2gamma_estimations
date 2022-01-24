@@ -9,6 +9,7 @@ Created on Fri Jan 21 16:26:00 2022
 import os
 import numpy as np 
 import matplotlib.pyplot as plt
+from scipy.interpolate import interp1d
 #import csv
 #import pandas as pd
 import sys
@@ -25,6 +26,7 @@ from pyne import data;
 
 class trap_contents:
     def __init__(self,
+                 cbsim3_folder='',
                  filename_out='',
                  time_in_trap_per_cycle=0,
                  trap_cycles=0,
@@ -36,8 +38,13 @@ class trap_contents:
                  tspan=0,
                  tspan_corrected=0,
                  beta_population=0,
-                 stacked_population=0
+                 stacked_population=0,
+                 population_rates=0,
+                 cbsim3_population=0,
+                 BR_to_isomer=0,
+                 isomer_rates=0,
                  ):
+        self.cbsim3_folder = cbsim3_folder
         self.filename_out = filename_out
         self.time_in_trap_per_cycle = time_in_trap_per_cycle
         self.trap_cycles = trap_cycles
@@ -53,57 +60,78 @@ class trap_contents:
         self.tspan_corrected = tspan_corrected
         self.beta_population = beta_population # processed out of PyNE Material()
         self.stacked_population = stacked_population
+        self.population_rates = population_rates
+        self.cbsim3_population = cbsim3_population
+        self.BR_to_isomer = BR_to_isomer
+        self.isomer_rates = isomer_rates
         
         return
     
     
-    def importCBSIM3(self, inputFile):    
-        
-        with open(inputFile, 'r') as fopen:
-            data = fopen.readlines()
+    def importCBSIM3(self):
+        """
+        Imports the data file from CBSIM. Performs a linear interpolation
+        and returns the function. The function can be called as f(x)
+        and returns the value up until the end of the data points.
+        """
+        self.cbsim3_population = {"Y98":[],
+                                  "Nb98":[],
+                                  }
 
-        headerStart = int(data.index(" &VARIABLES\n"))
-        headerEnd = int(data.index(" &END\n"))
-        print("header ends at %s"%headerEnd)
-        headerDict = {}
-        for dval in data[headerStart+1:headerEnd]:
-            headerDict[dval.split()[0]] = dval.split("=")[-1]
-            
-        Z = int(headerDict["NORDER"][:-2])
-        if any(['Charge abundance at the steps' in i for i in data]):
-            trth = ['Charge abundance at the steps' in i for i in data]
-            idc = int([*filter(lambda i: trth[i], range(len(trth)))][0] )
-            # idc + 5 gives first time step, +5 for each subsequent time step
-            data = data[idc+5:] # chop off the unwanted stuff.
-            
-            # data chuncks have variable length (num charge states), use blank line to find chunks
-            stepdata = [[] for i in range(data.count(' \n')+1) ]
-            skips = [' \n' in i for i in data]
-            idcs = [*filter(lambda i: skips[i], range(len(skips)))]
-            idcs = [0]+[i+1 for i in idcs]
-            timestamps = np.zeros(len(stepdata)-1)
-            population = np.zeros((len(stepdata)-1,Z+1))
-            for idx, d in enumerate(stepdata):
-                if idx == len(stepdata)-1:
-                    stepdata[idx] = data[idcs[idx]:]
-                else:
-                    stepdata[idx] = data[idcs[idx]:idcs[idx+1]-1]
-            # first index of sub-list is time step. All others contain charge state and abundance.
-            # technically, we only want the final value, but take -2 because -1 is just a timestamp alone (??)
-            for idx, d in enumerate(stepdata[:-1]):
-                timestamps[idx] = float(d[0])
-                tempdata = [*map(lambda x: [int(x.split()[0]),float(x.split()[1])] ,d[1:])]
-                for val in tempdata:
-                    population[idx][val[0]] = val[1]
-            
-            print("========== importing CBSIM3 file ============")
-            print("imported "+inputFile+", final ts = %s seconds"%timestamps[-1] )
-            print("Current density is %s"%headerDict["DENS"])
-            print("Ebeam energy is %s"%headerDict["ENERGY"])
-            print("\n")
-        else:
-            "Error, wrong data file or something..."
-            return timestamps, population
+        fids = os.listdir(self.cbsim3_folder)
+        fids = [i for i in fids if ".DAT" in i]
+        for fid in fids:
+            with open(self.cbsim3_folder+os.sep+fid, 'r') as fopen:
+                data = fopen.readlines()
+            headerStart = int(data.index(" &VARIABLES\n"))
+            headerEnd = int(data.index(" &END\n"))
+            headerDict = {}
+            for dval in data[headerStart+1:headerEnd]:
+                headerDict[dval.split()[0]] = dval.split("=")[-1]
+            Z = int(headerDict["NORDER"][:-2])
+            if any(['Charge abundance at the steps' in i for i in data]):
+                trth = ['Charge abundance at the steps' in i for i in data]
+                idc = int([*filter(lambda i: trth[i], range(len(trth)))][0] )
+                # idc + 5 gives first time step, +5 for each subsequent time step
+                data = data[idc+5:] # chop off the unwanted stuff.
+                
+                # data chuncks have variable length (num charge states), use blank line to find chunks
+                stepdata = [[] for i in range(data.count(' \n')+1) ]
+                skips = [' \n' in i for i in data]
+                idcs = [*filter(lambda i: skips[i], range(len(skips)))]
+                idcs = [0]+[i+1 for i in idcs]
+                timestamps = np.zeros(len(stepdata)-1)
+                population = np.zeros((len(stepdata)-1,Z+1))
+                for idx, d in enumerate(stepdata):
+                    if idx == len(stepdata)-1:
+                        stepdata[idx] = data[idcs[idx]:]
+                    else:
+                        stepdata[idx] = data[idcs[idx]:idcs[idx+1]-1]
+                # first index of sub-list is time step. All others contain charge state and abundance.
+                # technically, we only want the final value, but take -2 because -1 is just a timestamp alone (??)
+                for idx, d in enumerate(stepdata[:-1]):
+                    timestamps[idx] = float(d[0])
+                    tempdata = [*map(lambda x: [int(x.split()[0]),float(x.split()[1])] ,d[1:])]
+                    for val in tempdata:
+                        population[idx][val[0]] = val[1]
+                
+                print("\n==== importing CBSIM3 file ====")
+                print("imported "+fid+", final ts = %s seconds"%timestamps[-1] )
+                print("Current density is %s A/cm^2"%headerDict["DENS"])
+                print("e-beam energy is %s eV"%headerDict["ENERGY"])
+            else:
+                print("Failure to import cbsim3 file")
+                sys.exit()
+            self.cbsim3_population[fid.split("_")[0]] = interp1d([0]+list(timestamps), [0]+list([*zip(*population)][-1]) )
+        
+        if timestamps[-1] < self.tspan[-1]:
+            print("time duration of CBSIM3 file is less than EBIT trapping time!")
+            sys.exit()
+
+        for key in self.cbsim3_population:
+            self.beta_population[key] = np.multiply(self.beta_population[key], self.cbsim3_population[key](self.tspan) )
+        
+        return
     
     def generate_beta_population(self):
         """ Uses PyNE to generate the population due to beta decay chain
@@ -119,7 +147,7 @@ class trap_contents:
         initial_pop = {self.primary_beam: 1.0}
         
         population = [[] for i in range(num_points)]
-        inp = Material(initial_pop, mass=1.0)
+        inp = Material(initial_pop, mass=1.0);
         population[0] = inp
         
         for idx,tval in enumerate(self.tspan[1:]):
@@ -163,19 +191,68 @@ class trap_contents:
         print("Keep in mind that EBIT trap capacity is 1e7 ions.")
         return 
     
+    def calculate_rates(self):
+        # not actually needed anymore
+        population_rates_array = {"Rb98": [],
+                                  "Sr98": [],
+                                  "Y98":  [],
+                                  "Zr98": [],
+                                  "Nb98": [],
+                                  "Mo98": [],}
+        for idx,val in enumerate(population_rates_array):
+            population_rates_array[val] = np.diff(self.stacked_population[val])/np.diff(self.tspan)
 
-def save_plot(filename_out, tspan, population_data, title="default title"):
+        self.tspan_corrected = self.tspan[:-1] + np.diff(self.tspan)/2
+        self.population_rates = population_rates_array
+        return
+
+    def isomer_production_rate(self):
+
+        self.isomer_rates = {"Y98": [],
+                             "Nb98": [],
+                             }
+
+        for key in self.BR_to_isomer:
+            self.isomer_rates[key] = np.multiply(self.stacked_population[key], data.decay_const(key)*self.BR_to_isomer[key] )
+
+        return
+    
+
+def save_plot(filename_out,
+                tspan,
+                population_data,
+                yscale="linear",
+                xscale="linear",
+                xlabel="population",
+                title="default title",
+                selector=[],
+                ):
+
     print("Saving plot")
+    if selector==[]:
+        keys = population_data.keys()
+    else:
+        keys = selector
     plt.figure(figsize=(12,9))
-    for key in population_data.keys():
+    for key in keys:
         plt.plot(tspan, population_data[key], label=key)
         
     plt.xlabel("time [seconds]")
-    plt.ylabel("population")
+    plt.ylabel(xlabel)
+    plt.xscale(xscale)
+    plt.yscale(yscale)
     plt.title(title)
     plt.legend()
     plt.savefig(filename_out, dpi=100)
     
+    return
+
+def interpolate_cbsim(tspan, population):
+
+    # simple linear is fine for this monotonic charge breeding curve
+    f = interp1d(tspan, population)
+
+
     return
 
 def add_shifted_array(array, num_shifts):
@@ -213,21 +290,52 @@ def runSimulation(my_trap_contents):
     
     # doesnt need inputs, already has self, doesn't need output, already has self
     my_trap_contents.generate_beta_population()
-    
-    my_trap_contents.stack_beam()
-    
+
     save_plot(my_trap_contents.filename_out,
               my_trap_contents.tspan,
               my_trap_contents.beta_population,
-              title="Single injection population")
+              title="Single injection population",
+              yscale="log",
+              )
+
+    # Convert to bare ions
+    # this plot will only have 98Y and 98Nb (parents of isomers)
+    # this function modifies self.beta_population, so its now
+    # the single bunch population of BARE ions
+    my_trap_contents.importCBSIM3()
+
+    save_plot(my_trap_contents.filename_out+"_bare",
+              my_trap_contents.tspan,
+              my_trap_contents.beta_population,
+              title="Single injection population, bare",
+              yscale="log",
+              selector=["Y98","Nb98"],
+              )
     
-    save_plot(my_trap_contents.filename_out+"_stacked",
+    # Stack the bare ions!
+    my_trap_contents.stack_beam()
+    
+    save_plot(my_trap_contents.filename_out+"_stacked_bare",
               my_trap_contents.tspan,
               my_trap_contents.stacked_population,
-              title="Population stacked at %s Hz for %s s duration"%(my_trap_contents.injection_frequency, my_trap_contents.total_injections/my_trap_contents.injection_frequency) )
-    
-    
-    
+              title="Population stacked at %s Hz for %s s duration, bare"%(my_trap_contents.injection_frequency, my_trap_contents.total_injections/my_trap_contents.injection_frequency),
+              yscale="log",
+              selector=["Y98","Nb98"],
+              )
+
+    # Multiply by lambda_beta and BR to 0+
+    my_trap_contents.isomer_production_rate()
+
+
+    save_plot(my_trap_contents.filename_out+"_isomer_rates",
+              my_trap_contents.tspan,
+              my_trap_contents.isomer_rates,
+              yscale="log",
+              xscale="log",
+              xlabel="Rate [1/s]",
+              title="Isomer Rates")
+
+
     return
 
 def getConfigEntry(config, heading, item, reqd=False, remove_spaces=True, default_val=''):
@@ -253,15 +361,17 @@ def processConfigFile(configFileName):
     if os.path.exists(configFileName):
         config.read(configFileName)
         my_trap_contents = trap_contents()
-        
+
+        #input stuff
+        my_trap_contents.cbsim3_folder =              getConfigEntry(config, 'input', 'cbsim3_folder', reqd=True, remove_spaces=True)
         # output stuff
-        my_trap_contents.filename_out           = getConfigEntry(config, 'output', 'filename_out', reqd=True, remove_spaces=True)
+        my_trap_contents.filename_out =               getConfigEntry(config, 'output', 'filename_out', reqd=True, remove_spaces=True)
         # injection stuff
-        my_trap_contents.primary_beam           = getConfigEntry(config, 'injection', 'primary_beam', reqd=True, remove_spaces=True)
-        my_trap_contents.isac_rate             = float(getConfigEntry(config, 'injection', 'isac_rate', reqd=True, remove_spaces=True))
-        my_trap_contents.injection_frequency    = int(getConfigEntry(config, 'injection', 'injection_frequency', reqd=True, remove_spaces=True))
+        my_trap_contents.primary_beam =               getConfigEntry(config, 'injection', 'primary_beam', reqd=True, remove_spaces=True)
+        my_trap_contents.isac_rate =            float(getConfigEntry(config, 'injection', 'isac_rate', reqd=True, remove_spaces=True))
+        my_trap_contents.injection_frequency =    int(getConfigEntry(config, 'injection', 'injection_frequency', reqd=True, remove_spaces=True))
         # trapping stuff
-        my_trap_contents.total_injections       = int(getConfigEntry(config, 'trapping', 'total_injections', reqd=True, remove_spaces=True))
+        my_trap_contents.total_injections =       int(getConfigEntry(config, 'trapping', 'total_injections', reqd=True, remove_spaces=True))
         my_trap_contents.time_in_trap_per_cycle = int(getConfigEntry(config, 'trapping', 'time_in_trap_per_cycle', reqd=True, remove_spaces=True))
         
         print("You have entered an ISAC rate of %s /s "%my_trap_contents.isac_rate)
@@ -276,6 +386,11 @@ def processConfigFile(configFileName):
     else:
         print("Config file doesn't exist: %s" %configFileName)
         sys.exit(1)
+
+    # some other pre-determined data
+    my_trap_contents.BR_to_isomer = {"Y98": 1.5e-1,
+                                    "Nb98": 2.6e-1,
+                                    }
     
     runSimulation(my_trap_contents)
     
