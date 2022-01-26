@@ -10,12 +10,14 @@ import os
 import numpy as np 
 import matplotlib.pyplot as plt
 from scipy.interpolate import interp1d
+from scipy import integrate
 #import csv
 #import pandas as pd
 import sys
 #import pyne;
 import argparse;
 import configparser;
+import time
 
 from pyne import nucname;
 from pyne.material import Material;
@@ -23,6 +25,9 @@ from pyne.transmute.chainsolve import Transmuter;
 from pyne import data;
 
 #%%
+
+
+
 
 class trap_contents:
     def __init__(self,
@@ -43,6 +48,11 @@ class trap_contents:
                  cbsim3_population=0,
                  BR_to_isomer=0,
                  isomer_rates=0,
+                 halflives_2gamma=0,
+                 decay_rates_2gamma=0,
+                 isomer_population=0,
+                 isomer_population_corrected=0,
+                 crude_estimate_2gamma = 0,
                  ):
         self.cbsim3_folder = cbsim3_folder
         self.filename_out = filename_out
@@ -64,6 +74,11 @@ class trap_contents:
         self.cbsim3_population = cbsim3_population
         self.BR_to_isomer = BR_to_isomer
         self.isomer_rates = isomer_rates
+        self.halflives_2gamma = halflives_2gamma
+        self.decay_rates_2gamma = decay_rates_2gamma
+        self.isomer_population = isomer_population
+        self.isomer_population_corrected = isomer_population_corrected
+        self.crude_estimate_2gamma = crude_estimate_2gamma
         
         return
     
@@ -123,7 +138,16 @@ class trap_contents:
                 print("Failure to import cbsim3 file")
                 sys.exit()
             self.cbsim3_population[fid.split("_")[0]] = interp1d([0]+list(timestamps), [0]+list([*zip(*population)][-1]) )
-        
+            
+            plt.figure(figsize=(12,8))
+            plt.plot(timestamps, list([*zip(*population)][-1]))
+            plt.title("Population of bare ions of %s"%fid.split("_")[0])
+            plt.xlabel("time [s]")
+            plt.ylabel("population")
+            plt.xscale("log")
+            plt.savefig("myplot_CBSIM3_%s"%fid.split("_")[0], dpi=100)
+
+
         if timestamps[-1] < self.tspan[-1]:
             print("time duration of CBSIM3 file is less than EBIT trapping time!")
             sys.exit()
@@ -132,6 +156,7 @@ class trap_contents:
             self.beta_population[key] = np.multiply(self.beta_population[key], self.cbsim3_population[key](self.tspan) )
         
         return
+
     
     def generate_beta_population(self):
         """ Uses PyNE to generate the population due to beta decay chain
@@ -216,6 +241,69 @@ class trap_contents:
             self.isomer_rates[key] = np.multiply(self.stacked_population[key], data.decay_const(key)*self.BR_to_isomer[key] )
 
         return
+
+    def calculate_isomer_population(self):
+        """ To calcualte this, we need the isomer_rates array. This tells use the
+        rate at which the 0+ isomers are produced as a function of time.
+
+        We make an assumption here that the rate of 0+ production is not affected
+        by the 2gamma decay. I.e. it happens so slowly that we only siphon off a little
+        bit of the main beta decay path.
+        """
+
+        # for key in self.isomer_rates:
+        #     f = interp1d(self.tspan, self.isomer_rates[key])
+        #     val = integrate.quad(f, 0, self.tspan[-1])[0]
+        #     print("total bare 0+ isomers of %s produced: %s"%(key, val))
+
+        # holds the isomer population (without losses to 2gamma)
+        self.isomer_population = {"Y98": np.zeros(len(self.tspan)-1),
+                                   "Nb98": np.zeros(len(self.tspan)-1),
+                                   }
+        # hols the number of 2gamma decays that occur per
+        self.decay_rates_2gamma = {"Zr98": np.zeros(len(self.tspan)-1),
+                                   "Mo98": np.zeros(len(self.tspan)-1),
+                                   }
+        self.isomer_losses = {"Zr98": np.zeros(len(self.tspan)),
+                              "Mo98": np.zeros(len(self.tspan)),
+                              }
+
+        self.crude_estimate_2gamma = {"Zr98": 0.0,
+                                      "Mo98": 0.0,
+                                      }
+
+        dt_array = np.diff(self.tspan)
+        # isomer rates only contains "Y98" and "Nb98"
+        for key in self.isomer_rates:
+            f = interp1d(self.tspan, self.isomer_rates[key])
+            key_children = [*map(nucname.name, [*data.decay_children(key)])]
+
+            # determines the correct key to store data in self.decay_rates_2gamma
+            key_2gamma = [*set(key_children) & set(self.decay_rates_2gamma.keys())][0]
+
+            # Omit the first value here:
+            for idx, val in enumerate(self.tspan[1:]):
+                self.isomer_population[key][idx] = integrate.quad(f, 0, val, limit=len(self.tspan))[0]
+
+            self.crude_estimate_2gamma[key_2gamma] = integrate.quad(f, 0, self.tspan[-1], limit=len(self.tspan))[0]
+            
+            for idx, val in enumerate(self.isomer_population[key]):
+                # update the population based on what was lost before
+                val = val - self.isomer_losses[key_2gamma][idx]
+
+                # calculate how many decays from current value
+                self.decay_rates_2gamma[key_2gamma][idx] = np.log(2)/self.halflives_2gamma[key_2gamma]* val * dt_array[idx]
+                
+                self.isomer_losses[key_2gamma][idx+1] = self.isomer_losses[key_2gamma][idx] + self.decay_rates_2gamma[key_2gamma][idx]
+
+        print("\n==== Calculated 2gamma decay rates ====")
+        for key in self.decay_rates_2gamma:
+            print("2gamma decays from $0+$ %s isomer: %s in %s seconds"%(key, sum(self.decay_rates_2gamma[key]), self.time_in_trap_per_cycle))
+            print("  --> Compare to the crude estimate: %s per trap cycle"%self.crude_estimate_2gamma[key])
+            print("We assume 25 percent of these are lost to IC from RR, so that's %s decays/sec\n"%(0.75*sum(self.decay_rates_2gamma[key])/self.time_in_trap_per_cycle))
+            
+
+        return
     
 
 def save_plot(filename_out,
@@ -296,6 +384,7 @@ def runSimulation(my_trap_contents):
               my_trap_contents.beta_population,
               title="Single injection population",
               yscale="log",
+              xscale="log",
               )
 
     # Convert to bare ions
@@ -309,6 +398,7 @@ def runSimulation(my_trap_contents):
               my_trap_contents.beta_population,
               title="Single injection population, bare",
               yscale="log",
+              xscale="log",
               selector=["Y98","Nb98"],
               )
     
@@ -320,6 +410,7 @@ def runSimulation(my_trap_contents):
               my_trap_contents.stacked_population,
               title="Population stacked at %s Hz for %s s duration, bare"%(my_trap_contents.injection_frequency, my_trap_contents.total_injections/my_trap_contents.injection_frequency),
               yscale="log",
+              xscale="log",
               selector=["Y98","Nb98"],
               )
 
@@ -330,11 +421,19 @@ def runSimulation(my_trap_contents):
     save_plot(my_trap_contents.filename_out+"_isomer_rates",
               my_trap_contents.tspan,
               my_trap_contents.isomer_rates,
-              yscale="log",
+              # yscale="log",
               xscale="log",
               xlabel="Rate [1/s]",
-              title="Isomer Rates")
+              title=r"$0_2^+$ isomer production rates, stacked injection")
 
+
+    
+    # print("tspan:")
+    # print("["+", ".join(map(str, my_trap_contents.tspan))+"]" )
+    # print("isomer rate:")
+    # print("["+", ".join(map(str, my_trap_contents.isomer_rates["Y98"]) )+"]")
+
+    my_trap_contents.calculate_isomer_population()
 
     return
 
@@ -391,8 +490,16 @@ def processConfigFile(configFileName):
     my_trap_contents.BR_to_isomer = {"Y98": 1.5e-1,
                                     "Nb98": 2.6e-1,
                                     }
+    # extrapolated from curve fit, seconds
+    my_trap_contents.halflives_2gamma = {"Zr98": 0.054,
+                                         "Mo98": 0.154,
+                                         }
+
     
+    start_time = time.time()
     runSimulation(my_trap_contents)
+    stop_time = time.time()
+    print("Simulation ran in %s seconds (using time.time(), so it's not perfect)"%(stop_time-start_time))
     
 def main():
     print("\n======== TITAN-EBIT 2-gamma count rate simulator ========\n\n")
