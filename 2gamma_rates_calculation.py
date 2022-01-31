@@ -11,13 +11,14 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.interpolate import interp1d
 from scipy import integrate
-#import csv
+import csv
 #import pandas as pd
 import sys
 #import pyne;
 import argparse;
 import configparser;
-import time
+# import time
+from datetime import *
 
 from pyne import nucname;
 from pyne.material import Material;
@@ -34,17 +35,14 @@ class trap_contents:
                  cbsim3_folder='',
                  filename_out='',
                  time_in_trap_per_cycle=0,
-                 trap_cycles=0,
                  injection_frequency=0,
                  total_injections=0,
                  primary_beam='',
                  bunch_size=0,
                  isac_rate=0,
                  tspan=0,
-                 tspan_corrected=0,
                  beta_population=0,
                  stacked_population=0,
-                 population_rates=0,
                  cbsim3_population=0,
                  BR_to_isomer=0,
                  isomer_rates=0,
@@ -53,11 +51,11 @@ class trap_contents:
                  isomer_population=0,
                  isomer_population_corrected=0,
                  crude_estimate_2gamma = 0,
+                 folder_out = '',
                  ):
         self.cbsim3_folder = cbsim3_folder
         self.filename_out = filename_out
         self.time_in_trap_per_cycle = time_in_trap_per_cycle
-        self.trap_cycles = trap_cycles
         
         self.injection_frequency = injection_frequency
         self.total_injections    = total_injections
@@ -67,10 +65,8 @@ class trap_contents:
         
         # these aren't inputs, I generate them during simulation
         self.tspan           = tspan
-        self.tspan_corrected = tspan_corrected
         self.beta_population = beta_population # processed out of PyNE Material()
         self.stacked_population = stacked_population
-        self.population_rates = population_rates
         self.cbsim3_population = cbsim3_population
         self.BR_to_isomer = BR_to_isomer
         self.isomer_rates = isomer_rates
@@ -79,6 +75,7 @@ class trap_contents:
         self.isomer_population = isomer_population
         self.isomer_population_corrected = isomer_population_corrected
         self.crude_estimate_2gamma = crude_estimate_2gamma
+        self.folder_out = folder_out
         
         return
     
@@ -134,18 +131,20 @@ class trap_contents:
                 print("imported "+fid+", final ts = %s seconds"%timestamps[-1] )
                 print("Current density is %s A/cm^2"%headerDict["DENS"])
                 print("e-beam energy is %s eV"%headerDict["ENERGY"])
+                print("--------\n")
             else:
                 print("Failure to import cbsim3 file")
                 sys.exit()
             self.cbsim3_population[fid.split("_")[0]] = interp1d([0]+list(timestamps), [0]+list([*zip(*population)][-1]) )
             
+
             plt.figure(figsize=(12,8))
             plt.plot(timestamps, list([*zip(*population)][-1]))
             plt.title("Population of bare ions of %s"%fid.split("_")[0])
             plt.xlabel("time [s]")
             plt.ylabel("population")
             plt.xscale("log")
-            plt.savefig("myplot_CBSIM3_%s"%fid.split("_")[0], dpi=100)
+            plt.savefig(self.folder_out+os.sep+self.filename_out+"_CBSIM3_%s"%fid.split("_")[0], dpi=100)
 
 
         if timestamps[-1] < self.tspan[-1]:
@@ -216,29 +215,16 @@ class trap_contents:
         print("Keep in mind that EBIT trap capacity is 1e7 ions.")
         return 
     
-    def calculate_rates(self):
-        # not actually needed anymore
-        population_rates_array = {"Rb98": [],
-                                  "Sr98": [],
-                                  "Y98":  [],
-                                  "Zr98": [],
-                                  "Nb98": [],
-                                  "Mo98": [],}
-        for idx,val in enumerate(population_rates_array):
-            population_rates_array[val] = np.diff(self.stacked_population[val])/np.diff(self.tspan)
-
-        self.tspan_corrected = self.tspan[:-1] + np.diff(self.tspan)/2
-        self.population_rates = population_rates_array
-        return
 
     def isomer_production_rate(self):
+        print("Calculating isomer production rate. Estimated half-life of CX and RR in EBIT is around 590 ms. So we assume worst case and that 25 percent of bare 0+ isomers are lost to IC")
 
         self.isomer_rates = {"Y98": [],
                              "Nb98": [],
                              }
 
         for key in self.BR_to_isomer:
-            self.isomer_rates[key] = np.multiply(self.stacked_population[key], data.decay_const(key)*self.BR_to_isomer[key] )
+            self.isomer_rates[key] = np.multiply(self.stacked_population[key], 0.75*data.decay_const(key)*self.BR_to_isomer[key] )
 
         return
 
@@ -296,17 +282,79 @@ class trap_contents:
                 
                 self.isomer_losses[key_2gamma][idx+1] = self.isomer_losses[key_2gamma][idx] + self.decay_rates_2gamma[key_2gamma][idx]
 
-        print("\n==== Calculated 2gamma decay rates ====")
+        print("\n==== Calculated 2gamma decay rates ====\n")
         for key in self.decay_rates_2gamma:
             print("2gamma decays from $0+$ %s isomer: %s in %s seconds"%(key, sum(self.decay_rates_2gamma[key]), self.time_in_trap_per_cycle))
             print("  --> Compare to the crude estimate: %s per trap cycle"%self.crude_estimate_2gamma[key])
-            print("We assume 25 percent of these are lost to IC from RR, so that's %s decays/sec\n"%(0.75*sum(self.decay_rates_2gamma[key])/self.time_in_trap_per_cycle))
+            print("This is after the 25 percent IC loss, so that's %s decays/sec\n"%(sum(self.decay_rates_2gamma[key])/self.time_in_trap_per_cycle))
             
 
         return
+
+    def write_report(self):
+        """ Write a report to a txt file for saving later
+        I also need to write the data to a csv file!
+
+        self.cbsim3_folder = cbsim3_folder
+        self.filename_out = filename_out
+        self.time_in_trap_per_cycle = time_in_trap_per_cycle
+        
+        self.injection_frequency = injection_frequency
+        self.total_injections    = total_injections
+        self.primary_beam        = primary_beam
+        self.bunch_size          = bunch_size
+        self.isac_rate           = isac_rate
+        
+        # these aren't inputs, I generate them during simulation
+        self.tspan           = tspan
+        self.beta_population = beta_population # processed out of PyNE Material()
+        self.stacked_population = stacked_population
+        self.cbsim3_population = cbsim3_population
+        self.BR_to_isomer = BR_to_isomer
+        self.isomer_rates = isomer_rates
+        self.halflives_2gamma = halflives_2gamma
+        self.decay_rates_2gamma = decay_rates_2gamma
+        self.isomer_population = isomer_population
+        self.isomer_population_corrected = isomer_population_corrected
+        self.crude_estimate_2gamma = crude_estimate_2gamma
+        with open(self.folder_out+os.sep+self.filename_out+"_report.txt", 'w') as fopen:
+        """
+            csvwriter = csv.writer(fopen, delimiter=',', quoting=csv.QUOTE_NONE, escapechar="%")
+            csvwriter.writerow(["==== Simulation report ===="])
+
+            csvwriter.writerow(["  ___injection___"])
+            csvwriter.writerow(['primary beam: %s, ISAC rate %s /s'%(self.primary_beam, self.isac_rate)])
+            csvwriter.writerow(["injection frequency: %s s"%self.injection_frequency])
+            csvwriter.writerow(["number of injections: %s, time elapsed during injections: %s s"%(self.injection_frequency, self.total_injections/self.injection_frequency)])
+            csvwriter.writerow(["EBIT bunch size (~6 percent ISAC-to-EBIT efficiency: %s "%self.bunch_size])
+            csvwriter.writerow(["duration of one trapping cycle %s s"%self.time_in_trap_per_cycle])
+            
+
+            csvwriter.writerow(["  ___final results___"])
+
+            csvwriter.writerow(["END"])
+
+
+
+        return
+
+    def write_dictionary(self, data, name):
+        """ This is to write out the various dictionaries that contain our population data
+
+        It should be EASY to read back in so I can write a separate script for plotting multiple
+        results.
+        """
+        with open(self.folder_out+os.sep+self.filename_out+"_"+name+".txt", 'w') as fopen:
+            fieldnames = data.keys()
+            # how to get tspan in here?
+            csvwriter = csv.DictWriter(fopen, fieldnames)
+            csvwriter.writeheader()
+            csvwriter.writerows([data])
+            
     
 
-def save_plot(filename_out,
+def save_plot(trap_contents,
+                filename_out,
                 tspan,
                 population_data,
                 yscale="linear",
@@ -331,7 +379,7 @@ def save_plot(filename_out,
     plt.yscale(yscale)
     plt.title(title)
     plt.legend()
-    plt.savefig(filename_out, dpi=100)
+    plt.savefig(trap_contents.folder_out+os.sep+filename_out, dpi=100)
     
     return
 
@@ -379,7 +427,8 @@ def runSimulation(my_trap_contents):
     # doesnt need inputs, already has self, doesn't need output, already has self
     my_trap_contents.generate_beta_population()
 
-    save_plot(my_trap_contents.filename_out,
+    save_plot(my_trap_contents,
+              my_trap_contents.filename_out,
               my_trap_contents.tspan,
               my_trap_contents.beta_population,
               title="Single injection population",
@@ -393,7 +442,8 @@ def runSimulation(my_trap_contents):
     # the single bunch population of BARE ions
     my_trap_contents.importCBSIM3()
 
-    save_plot(my_trap_contents.filename_out+"_bare",
+    save_plot(my_trap_contents,
+              my_trap_contents.filename_out+"_bare",
               my_trap_contents.tspan,
               my_trap_contents.beta_population,
               title="Single injection population, bare",
@@ -405,7 +455,8 @@ def runSimulation(my_trap_contents):
     # Stack the bare ions!
     my_trap_contents.stack_beam()
     
-    save_plot(my_trap_contents.filename_out+"_stacked_bare",
+    save_plot(my_trap_contents,
+              my_trap_contents.filename_out+"_stacked_bare",
               my_trap_contents.tspan,
               my_trap_contents.stacked_population,
               title="Population stacked at %s Hz for %s s duration, bare"%(my_trap_contents.injection_frequency, my_trap_contents.total_injections/my_trap_contents.injection_frequency),
@@ -418,7 +469,8 @@ def runSimulation(my_trap_contents):
     my_trap_contents.isomer_production_rate()
 
 
-    save_plot(my_trap_contents.filename_out+"_isomer_rates",
+    save_plot(my_trap_contents,
+              my_trap_contents.filename_out+"_isomer_rates",
               my_trap_contents.tspan,
               my_trap_contents.isomer_rates,
               # yscale="log",
@@ -434,6 +486,10 @@ def runSimulation(my_trap_contents):
     # print("["+", ".join(map(str, my_trap_contents.isomer_rates["Y98"]) )+"]")
 
     my_trap_contents.calculate_isomer_population()
+
+    my_trap_contents.write_report()
+
+    my_trap_contents.write_dictionary(my_trap_contents.beta_population, "beta_population")
 
     return
 
@@ -461,6 +517,7 @@ def processConfigFile(configFileName):
         config.read(configFileName)
         my_trap_contents = trap_contents()
 
+
         #input stuff
         my_trap_contents.cbsim3_folder =              getConfigEntry(config, 'input', 'cbsim3_folder', reqd=True, remove_spaces=True)
         # output stuff
@@ -473,7 +530,7 @@ def processConfigFile(configFileName):
         my_trap_contents.total_injections =       int(getConfigEntry(config, 'trapping', 'total_injections', reqd=True, remove_spaces=True))
         my_trap_contents.time_in_trap_per_cycle = int(getConfigEntry(config, 'trapping', 'time_in_trap_per_cycle', reqd=True, remove_spaces=True))
         
-        print("You have entered an ISAC rate of %s /s "%my_trap_contents.isac_rate)
+        print("You have entered an ISAC rate of %s /s of %s"%(my_trap_contents.isac_rate,my_trap_contents.primary_beam))
         print("ISAC to TITAN-RFQ transport efficiency: 0.85")
         print("At %s Hz RFQ operation, this gives a RFQ bunch size of %s /s"%(my_trap_contents.injection_frequency, my_trap_contents.isac_rate*0.85/my_trap_contents.injection_frequency))
         print("The following TITAN transport efficiencies are assumed:")
@@ -495,11 +552,14 @@ def processConfigFile(configFileName):
                                          "Mo98": 0.154,
                                          }
 
+    # for a unique timestamp folder name
+    my_trap_contents.folder_out = my_trap_contents.filename_out+"_"+datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
     
-    start_time = time.time()
+    os.mkdir(my_trap_contents.folder_out)
+    # start_time = time.time()
     runSimulation(my_trap_contents)
-    stop_time = time.time()
-    print("Simulation ran in %s seconds (using time.time(), so it's not perfect)"%(stop_time-start_time))
+    # stop_time = time.time()
+    # print("Simulation ran in %s seconds (using time.time(), so it's not perfect)"%(stop_time-start_time))
     
 def main():
     print("\n======== TITAN-EBIT 2-gamma count rate simulator ========\n\n")
